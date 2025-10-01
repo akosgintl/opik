@@ -182,6 +182,8 @@ class CrossoverOps:
         parent1_messages: list[dict[str, str]] = ind1
         parent2_messages: list[dict[str, str]] = ind2
         current_output_style_guidance = self.output_style_guidance
+        # Detect if we're working with multimodal prompts (check both parents)
+        is_multimodal = evo_prompts._is_multimodal_prompt(parent1_messages) or evo_prompts._is_multimodal_prompt(parent2_messages)
 
         user_prompt_for_llm_crossover = evo_prompts.llm_crossover_user_prompt(
             parent1_messages, parent2_messages, current_output_style_guidance
@@ -195,7 +197,7 @@ class CrossoverOps:
                     {
                         "role": "system",
                         "content": evo_prompts.llm_crossover_system_prompt(
-                            current_output_style_guidance
+                            current_output_style_guidance, is_multimodal=is_multimodal
                         ),
                     },
                     {"role": "user", "content": user_prompt_for_llm_crossover},
