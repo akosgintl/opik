@@ -6,6 +6,7 @@ set -euo pipefail
 
 # Variables
 DEBUG_MODE=${DEBUG_MODE:-false}
+ORIGINAL_COMMAND="$0 $@"
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
@@ -79,36 +80,70 @@ find_jar_files() {
     return 0  # JAR file found and selected
 }
 
-# Function to start infrastructure
-start_infrastructure() {
-    log_info "Starting infrastructure services (MySQL, Redis, ClickHouse, etc.)..."
+# Function to start Docker services (infrastructure or infrastructure + frontend or etc.)
+# Args: $1 = mode (--infra or --local-be or etc.)
+start_docker_services() {
+    local mode="$1"
+    
+    log_info "Starting Docker services..."
     cd "$PROJECT_ROOT" || { log_error "Project root directory not found"; exit 1; }
     
-    if ./opik.sh --infra --port-mapping; then
-        log_success "Infrastructure services started successfully"
+    if ./opik.sh "$mode" --port-mapping; then
+        log_success "Docker services started successfully"
     else
-        log_error "Failed to start infrastructure services"
+        log_error "Failed to start Docker services"
         exit 1
     fi
 }
 
-# Function to stop infrastructure
-stop_infrastructure() {
-    log_info "Stopping infrastructure services..."
+# Function to stop Docker services (infrastructure or infrastructure + frontend or etc.)
+# Args: $1 = mode (--infra or --local-be or etc.)
+stop_docker_services() {
+    local mode="$1"
+    
+    log_info "Stopping Docker services..."
     cd "$PROJECT_ROOT" || { log_error "Project root directory not found"; exit 1; }
     
-    if ./opik.sh --infra --stop; then
-        log_success "Infrastructure services stopped"
+    if ./opik.sh "$mode" --stop; then
+        log_success "Docker services stopped"
     else
-        log_warning "Failed to stop some infrastructure services"
+        log_warning "Failed to stop some Docker services"
     fi
 }
 
-# Function to verify infrastructure
-verify_infrastructure() {
+# Function to verify Docker services
+# Args: $1 = mode (--infra or --local-be or etc.)
+verify_docker_services() {
+    local mode="$1"
+    
     cd "$PROJECT_ROOT" || { log_error "Project root directory not found"; exit 1; }
-    ./opik.sh --infra --verify >/dev/null 2>&1
+    ./opik.sh "$mode" --verify >/dev/null 2>&1
     return $?
+}
+
+# Wrapper functions for backward compatibility and clearer intent
+start_infrastructure() {
+    start_docker_services "--infra"
+}
+
+stop_infrastructure() {
+    stop_docker_services "--infra"
+}
+
+verify_infrastructure() {
+    verify_docker_services "--infra"
+}
+
+start_local_be_docker_services() {
+    start_docker_services "--local-be"
+}
+
+stop_local_be_docker_services() {
+    stop_docker_services "--local-be"
+}
+
+verify_local_be_docker_services() {
+    verify_docker_services "--local-be"
 }
 
 # Function to build backend
@@ -118,8 +153,10 @@ build_backend() {
     log_debug "Backend directory: $BACKEND_DIR"
     cd "$BACKEND_DIR" || { log_error "Backend directory not found"; exit 1; }
 
-    log_debug "Running: mvn clean install -DskipTests"
-    if mvn clean install -DskipTests; then
+    # resolve.skip=true skips swagger, adjust if any future interference
+    MAVEN_BUILD_CMD="mvn clean install -T 1C -Dmaven.test.skip=true -Dspotless.skip=true -Dmaven.javadoc.skip=true -Dmaven.source.skip=true -Dmaven.test.compile.skip=true -Dmaven.test.resources.skip=true -Dmaven.compiler.useIncrementalCompilation=false -Dresolve.skip=true"
+    log_debug "Running: $MAVEN_BUILD_CMD"
+    if $MAVEN_BUILD_CMD; then
         log_success "Backend build completed successfully"
     else
         log_error "Backend build failed"
@@ -167,6 +204,69 @@ lint_backend() {
         log_error "Backend linting failed"
         exit 1
     fi
+}
+
+print_migrations_recovery_message() {
+    log_error "To recover, you may need to clean up Docker volumes (WARNING: ALL DATA WILL BE LOST):"
+    log_error "  1. Stop all services: $0 --stop"
+    log_error "  2. Remove Docker volumes (DANGER): docker volume prune -a -f"
+    log_error "  3. Run again your current flow: $ORIGINAL_COMMAND"
+}
+
+# Function to run database migrations
+run_db_migrations() {
+    require_command java
+    log_info "Running database migrations..."
+    log_debug "Backend directory: $BACKEND_DIR"
+    cd "$BACKEND_DIR" || { log_error "Backend directory not found"; exit 1; }
+
+    # Find and validate the JAR file
+    if ! find_jar_files; then
+        log_warning "No backend JAR file found in target/. Building backend automatically..."
+        build_backend
+
+        # Re-scan for JAR files after build
+        if ! find_jar_files; then
+            log_error "Backend build completed but no JAR file found. Build may have failed."
+            exit 1
+        fi
+    fi
+
+    log_debug "Running migrations with JAR: $JAR_FILE"
+    log_debug "Current directory: $(pwd)"
+
+    # Run MySQL (state DB) migrations
+    log_info "Running MySQL (state DB) migrations..."
+    # Set the database name environment variable for MySQL migrations
+    export STATE_DB_DATABASE_NAME="opik"
+    if java -jar "$JAR_FILE" db migrate config.yml; then
+        log_success "MySQL migrations completed successfully"
+    else
+        # TODO: dbAnalytics clear-checksums not supported by liquibase-clickhouse yet,
+        #  this would enable automatic recovery,
+        #  not worthy adding it only for MySQL as volumes might need pruning anyway
+        log_error "MySQL migrations failed"
+        print_migrations_recovery_message
+        exit 1
+    fi
+
+    # Run ClickHouse (analytics DB) migrations
+    log_info "Running ClickHouse (analytics DB) migrations..."
+    # Set the database name environment variable for ClickHouse migrations
+    export ANALYTICS_DB_DATABASE_NAME="opik"
+    # Set the connection URL to ensure connection to opik database
+    export ANALYTICS_DB_MIGRATIONS_URL="jdbc:clickhouse://localhost:8123"
+    if java -jar "$JAR_FILE" dbAnalytics migrate config.yml; then
+        log_success "ClickHouse migrations completed successfully"
+    else
+        # TODO: dbAnalytics clear-checksums not supported by liquibase-clickhouse yet,
+        #  this would enable automatic recovery
+        log_error "ClickHouse migrations failed"
+        print_migrations_recovery_message
+        exit 1
+    fi
+
+    log_success "All database migrations completed successfully"
 }
 
 # Function to start backend
@@ -388,6 +488,81 @@ stop_frontend() {
     fi
 }
 
+# Helper function to display backend process status
+# Returns: 0 if running, 1 if stopped
+display_backend_process_status() {
+    if [ -f "$BACKEND_PID_FILE" ] && kill -0 "$(cat "$BACKEND_PID_FILE")" 2>/dev/null; then
+        echo -e "Backend: ${GREEN}RUNNING${NC} (PID: $(cat "$BACKEND_PID_FILE"))"
+        return 0
+    else
+        echo -e "Backend: ${RED}STOPPED${NC}"
+        return 1
+    fi
+}
+
+# Helper function to display access information
+# Args: $1 = UI URL (e.g., "http://localhost:5174" or "http://localhost:5173")
+#       $2 = show manual edit warning (true/false)
+show_access_information() {
+    local ui_url="$1"
+    local show_manual_edit="${2:-true}"
+    
+    echo ""
+    echo -e "${GREEN}🚀 Opik Development Environment is Ready!${NC}"
+    echo -e "${BLUE}📊  Access the UI:     ${ui_url}${NC}"
+    echo -e "${BLUE}🛠️  API ping Endpoint: http://localhost:8080/is-alive/ping${NC}"
+    echo ""
+    echo -e "${BLUE}ℹ️  SDK Configuration Required:${NC}"
+    echo -e "To use the Opik SDK with your local development environment, you MUST configure it to point to your local instance."
+    echo ""
+    echo -e "${BLUE}Run SDK Configuration Command:${NC}"
+    echo "  opik configure --use_local"
+    
+    if [ "$show_manual_edit" = true ]; then
+        echo "  # When prompted:"
+        echo "  #   - Choose 'Local deployment' option"
+        echo "  #   - Enter URL: http://localhost:8080"
+        echo ""
+        echo -e "${YELLOW}⚠️  IMPORTANT: Manual Configuration File Edit Required!${NC}"
+        echo -e "After running 'opik configure', you MUST manually edit the configuration file to remove '/api' from the URL."
+        echo ""
+        echo -e "${BLUE}Edit the configuration file:${NC}"
+        echo "  # Open the configuration file, by default: ~/.opik.config"
+        echo ""
+        echo "  # Change this line:"
+        echo "  url_override = http://localhost:8080/api/"
+        echo ""
+        echo "  # To this (remove '/api'):"
+        echo "  url_override = http://localhost:8080"
+    else
+        echo "  # When prompted, use URL: ${ui_url}"
+    fi
+    
+    echo ""
+    echo -e "${BLUE}Alternative - Environment Variables:${NC}"
+    # When no manual edit is required (BE-only mode), append /api to the URL
+    if [ "$show_manual_edit" = true ]; then
+        echo "  export OPIK_URL_OVERRIDE='http://localhost:8080'"
+    else
+        echo "  export OPIK_URL_OVERRIDE='${ui_url}/api'"
+    fi
+    echo "  export OPIK_WORKSPACE='default'"
+    echo ""
+    echo -e "${YELLOW}Important Notes:${NC}"
+
+    echo "  • The configuration file is located at ~/.opik.config by default"
+
+    if [ "$show_manual_edit" = true ]; then
+        echo "  • You MUST remove '/api' from the URL for local development"
+    fi
+    
+    echo "  • Default workspace is 'default'"
+    echo "  • No API key required for local instances"
+    echo ""
+    echo -e "${BLUE}📖 For complete configuration documentation, visit:${NC}"
+    echo -e "   https://www.comet.com/docs/opik/tracing/sdk_configuration"
+}
+
 # Function to verify services
 verify_services() {
     log_info "=== Opik Development Status ==="
@@ -403,11 +578,8 @@ verify_services() {
     
     # Backend status
     local backend_running=false
-    if [ -f "$BACKEND_PID_FILE" ] && kill -0 "$(cat "$BACKEND_PID_FILE")" 2>/dev/null; then
-        echo -e "Backend: ${GREEN}RUNNING${NC} (PID: $(cat "$BACKEND_PID_FILE"))"
+    if display_backend_process_status; then
         backend_running=true
-    else
-        echo -e "Backend: ${RED}STOPPED${NC}"
     fi
     
     # Frontend status
@@ -421,44 +593,7 @@ verify_services() {
 
     # Show access information if all services are running
     if [ "$infra_running" = true ] && [ "$backend_running" = true ] && [ "$frontend_running" = true ]; then
-        echo ""
-        echo -e "${GREEN}🚀 Opik Development Environment is Ready!${NC}"
-        echo -e "${BLUE}📊  Access the UI:     http://localhost:5174${NC}"
-        echo -e "${BLUE}🛠️  API ping Endpoint: http://localhost:8080/is-alive/ping${NC}"
-        echo ""
-        echo -e "${BLUE}ℹ️  SDK Configuration Required:${NC}"
-        echo -e "To use the Opik SDK with your local development environment, you MUST configure it to point to your local instance."
-        echo ""
-        echo -e "${BLUE}Step 1 - Run Python SDK Configuration (CLI):${NC}"
-        echo "  opik configure"
-        echo "  # When prompted:"
-        echo "  #   - Choose 'Local deployment' option"
-        echo "  #   - Enter URL: http://localhost:8080"
-        echo ""
-        echo -e "${YELLOW}⚠️  IMPORTANT: Manual Configuration File Edit Required!${NC}"
-        echo -e "After running 'opik configure', you MUST manually edit the configuration file to remove '/api' from the URL."
-        echo ""
-        echo -e "${BLUE}Step 2 - Edit the configuration file:${NC}"
-        echo "  # Open the configuration file, by default: ~/.opik.config"
-        echo ""
-        echo "  # Change this line:"
-        echo "  url_override = http://localhost:8080/api/"
-        echo ""
-        echo "  # To this (remove '/api'):"
-        echo "  url_override = http://localhost:8080"
-        echo ""
-        echo -e "${BLUE}Alternative for previous steps - Environment Variables:${NC}"
-        echo "  export OPIK_URL_OVERRIDE='http://localhost:8080'"
-        echo "  export OPIK_WORKSPACE='default'"
-        echo ""
-        echo -e "${YELLOW}Important Notes:${NC}"
-        echo "  • The configuration file is located at ~/.opik.config by default"
-        echo "  • You MUST remove '/api' from the URL for local development"
-        echo "  • Default workspace is 'default'"
-        echo "  • No API key required for local instances"
-        echo ""
-        echo -e "${BLUE}📖 For complete configuration documentation, visit:${NC}"
-        echo -e "   https://www.comet.com/docs/opik/tracing/sdk_configuration"
+        show_access_information "http://localhost:5174" true
     fi
 
     echo ""
@@ -467,48 +602,181 @@ verify_services() {
     echo "  Frontend: tail -f /tmp/opik-frontend.log"
 }
 
+# Function to verify BE-only services
+verify_be_only_services() {
+    log_info "=== Opik BE-Only Development Status ==="
+    
+    # Infrastructure and Docker Frontend status
+    local docker_services_running=false
+    if verify_local_be_docker_services; then
+        echo -e "Infrastructure + Docker Frontend: ${GREEN}RUNNING${NC} (Docker containers)"
+        docker_services_running=true
+    else
+        echo -e "Infrastructure + Docker Frontend: ${RED}STOPPED${NC} (Docker containers)"
+    fi
+    
+    # Backend process status
+    local backend_running=false
+    if display_backend_process_status; then
+        backend_running=true
+    fi
+
+    # Show access information if all services are running
+    if [ "$docker_services_running" = true ] && [ "$backend_running" = true ]; then
+        show_access_information "http://localhost:5173" false
+    fi
+
+    echo ""
+    echo "Logs:"
+    echo "  Backend Process: tail -f /tmp/opik-backend.log"
+    echo "  Docker Services: docker logs -f opik-frontend-1"
+}
+
+# Function to start services (without building)
+start_services() {
+    log_info "=== Starting Opik Development Environment ==="
+    log_warning "=== Not rebuilding: the latest local changes may not be reflected ==="
+    log_info "Step 1/4: Starting infrastructure..."
+    start_infrastructure
+    log_info "Step 2/4: Running DB migrations..."
+    run_db_migrations
+    log_info "Step 3/4: Starting backend..."
+    start_backend
+    log_info "Step 4/4: Starting frontend..."
+    start_frontend
+    log_success "=== Start Complete ==="
+    verify_services
+}
+
+# Function to stop services
+stop_services() {
+    log_info "=== Stopping Opik Development Environment ==="
+    log_info "Step 1/3: Stopping frontend..."
+    stop_frontend
+    log_info "Step 2/3: Stopping backend..."
+    stop_backend
+    log_info "Step 3/3: Stopping infrastructure..."
+    stop_infrastructure
+    log_success "=== Stop Complete ==="
+}
+
+# Function to run migrations
+migrate_services() {
+    log_info "=== Running Database Migrations ==="
+    log_info "Step 1/3: Starting infrastructure..."
+    start_infrastructure
+    log_info "Step 2/3: Building backend..."
+    build_backend
+    log_info "Step 3/3: Running DB migrations..."
+    run_db_migrations
+    log_success "=== Migrations Complete ==="
+}
+
 # Function to restart services (stop, build, start)
 restart_services() {
     log_info "=== Restarting Opik Development Environment ==="
-    log_info "Step 1/8: Stopping frontend..."
+    log_info "Step 1/9: Stopping frontend..."
     stop_frontend
-    log_info "Step 2/8: Stopping backend..."
+    log_info "Step 2/9: Stopping backend..."
     stop_backend
-    log_info "Step 3/8: Stopping infrastructure..."
+    log_info "Step 3/9: Stopping infrastructure..."
     stop_infrastructure
-    log_info "Step 4/8: Starting infrastructure..."
+    log_info "Step 4/9: Starting infrastructure..."
     start_infrastructure
-    log_info "Step 5/8: Building backend..."
+    log_info "Step 5/9: Building backend..."
     build_backend
-    log_info "Step 6/8: Building frontend..."
+    log_info "Step 6/9: Building frontend..."
     build_frontend
-    log_info "Step 7/8: Starting backend..."
+    log_info "Step 7/9: Running DB migrations..."
+    run_db_migrations
+    log_info "Step 8/9: Starting backend..."
     start_backend
-    log_info "Step 8/8: Starting frontend..."
+    log_info "Step 9/9: Starting frontend..."
     start_frontend
     log_success "=== Restart Complete ==="
     verify_services
+}
+
+# Function to start BE-only services (without building)
+start_be_only_services() {
+    log_info "=== Starting Opik BE-Only Development Environment ==="
+    log_warning "=== Not rebuilding: the latest local changes may not be reflected ==="
+    log_info "Step 1/3: Starting infrastructure and Docker frontend..."
+    start_local_be_docker_services
+    log_info "Step 2/3: Running DB migrations..."
+    run_db_migrations
+    log_info "Step 3/3: Starting backend process..."
+    start_backend
+    log_success "=== BE-Only Start Complete ==="
+    verify_be_only_services
+}
+
+# Function to stop BE-only services
+stop_be_only_services() {
+    log_info "=== Stopping Opik BE-Only Development Environment ==="
+    log_info "Step 1/2: Stopping backend process..."
+    stop_backend
+    log_info "Step 2/2: Stopping infrastructure and Docker frontend..."
+    stop_local_be_docker_services
+    log_success "=== BE-Only Stop Complete ==="
+}
+
+# Function to restart BE-only services (stop, build, start)
+restart_be_only_services() {
+    log_info "=== Restarting Opik BE-Only Development Environment ==="
+    log_info "Step 1/6: Stopping backend process..."
+    stop_backend
+    log_info "Step 2/6: Stopping infrastructure and Docker frontend..."
+    stop_local_be_docker_services
+    log_info "Step 3/6: Starting infrastructure and Docker frontend..."
+    start_local_be_docker_services
+    log_info "Step 4/6: Building backend..."
+    build_backend
+    log_info "Step 5/6: Running DB migrations..."
+    run_db_migrations
+    log_info "Step 6/6: Starting backend process..."
+    start_backend
+    log_success "=== BE-Only Restart Complete ==="
+    verify_be_only_services
 }
 
 # Function to show usage
 show_usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "Options:"
+    echo "Standard Mode (BE and FE services as processes):"
+    echo "  --start        - Start Docker infrastructure, and BE and FE processes (without building)"
+    echo "  --stop         - Stop Docker infrastructure, and BE and FE processes"
+    echo "  --restart      - Stop, build, and start Docker infrastructure, and BE and FE processes (DEFAULT IF NO OPTIONS PROVIDED)"
+    echo "  --verify       - Verify status of Docker infrastructure, and BE and FE processes"
+    echo ""
+    echo "BE-Only Mode (BE as process, FE in Docker):"
+    echo "  --be-only-start    - Start Docker infrastructure and FE, and backend process (without building)"
+    echo "  --be-only-stop     - Stop Docker infrastructure and FE, and backend process"
+    echo "  --be-only-restart  - Stop, build, and start Docker infrastructure and FE, and backend process"
+    echo "  --be-only-verify   - Verify status of Docker infrastructure and FE, and backend process"
+    echo ""
+    echo "Other options:"
     echo "  --build-be     - Build backend"
     echo "  --build-fe     - Build frontend"
-    echo "  --start        - Start all services (without building)"
-    echo "  --stop         - Stop all services"
-    echo "  --restart      - Stop, build, and start all services (DEFAULT IF NO OPTIONS PROVIDED)"
-    echo "  --verify       - Verify status of all services"
+    echo "  --migrate      - Run database migrations"
+    echo "  --lint-be      - Lint backend code"
+    echo "  --lint-fe      - Lint frontend code"
     echo "  --debug        - Enable debug mode (meant to be combined with other flags)"
     echo "  --logs         - Show logs for backend and frontend services"
-    echo "  --lint-fe      - Lint frontend code"
-    echo "  --lint-be      - Lint backend code"
     echo "  --help         - Show this help message"
     echo ""
     echo "Environment Variables:"
     echo "  DEBUG_MODE=true  - Enable debug mode"
+}
+
+# Function to handle unknown options
+handle_unknown_option() {
+    local option="$1"
+    log_error "Unknown option: $option"
+    echo ""
+    show_usage
+    exit 1
 }
 
 # Function to show logs
@@ -565,23 +833,32 @@ case "${1:-}" in
     "--build-fe")
         build_frontend
         ;;
+    "--migrate")
+        migrate_services
+        ;;
     "--start")
-        start_infrastructure
-        start_backend
-        start_frontend
-        verify_services
+        start_services
         ;;
     "--stop")
-        stop_frontend
-        stop_backend
-        stop_infrastructure
-        log_success "All services stopped"
+        stop_services
         ;;
     "--restart")
         restart_services
         ;;
     "--verify")
         verify_services
+        ;;
+    "--be-only-start")
+        start_be_only_services
+        ;;
+    "--be-only-stop")
+        stop_be_only_services
+        ;;
+    "--be-only-restart")
+        restart_be_only_services
+        ;;
+    "--be-only-verify")
+        verify_be_only_services
         ;;
     "--logs")
         show_logs
@@ -600,9 +877,6 @@ case "${1:-}" in
         restart_services
         ;;
     *)
-        log_error "Unknown option: $1"
-        echo ""
-        show_usage
-        exit 1
+        handle_unknown_option "$1"
         ;;
 esac
