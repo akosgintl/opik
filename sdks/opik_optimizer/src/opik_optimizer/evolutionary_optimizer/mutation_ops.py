@@ -1,5 +1,4 @@
 from typing import Any, TYPE_CHECKING, Union, List, Dict
-from typing import Any, TYPE_CHECKING
 from collections.abc import Callable
 
 import json
