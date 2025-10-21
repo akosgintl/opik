@@ -21,7 +21,10 @@ import {
   COLUMN_FEEDBACK_SCORES_ID,
   COLUMN_DURATION_ID,
 } from "@/types/shared";
-import { EXPERIMENT_ITEM_OUTPUT_PREFIX } from "@/constants/experiments";
+import {
+  EXPERIMENT_ITEM_OUTPUT_PREFIX,
+  EXPERIMENT_ITEM_DATASET_PREFIX,
+} from "@/constants/experiments";
 import ExplainerIcon from "@/components/shared/ExplainerIcon/ExplainerIcon";
 import { EXPLAINER_ID, EXPLAINERS_MAP } from "@/constants/explainers";
 import { Separator } from "@/components/ui/separator";
@@ -59,6 +62,18 @@ const processNestedExportColumn = (
     accumulator[`${prefix}evaluation_task.${evaluationName}`] = get(
       item ?? {},
       keys,
+      "-",
+    );
+
+    return;
+  }
+
+  // Handle dataset columns with "data." prefix
+  if (prefixColumnKey === EXPERIMENT_ITEM_DATASET_PREFIX) {
+    const fieldName = column.replace(`${prefixColumnKey}.`, "");
+    accumulator[`${prefix}dataset.${fieldName}`] = get(
+      item.data,
+      fieldName,
       "-",
     );
 
@@ -115,7 +130,12 @@ const CompareExperimentsActionsPanel: React.FC<
           );
 
           if (isDatasetColumn) {
-            accumulator[`dataset.${column}`] = get(row.data, column, "-");
+            // Handle dataset columns with "data." prefix
+            const fieldName =
+              prefix === EXPERIMENT_ITEM_DATASET_PREFIX
+                ? column.replace(`${EXPERIMENT_ITEM_DATASET_PREFIX}.`, "")
+                : column;
+            accumulator[`dataset.${fieldName}`] = get(row.data, fieldName, "-");
 
             return accumulator;
           }
