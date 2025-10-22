@@ -15,6 +15,7 @@ import com.comet.opik.api.filter.PromptField;
 import com.comet.opik.api.filter.SpanField;
 import com.comet.opik.api.filter.TraceField;
 import com.comet.opik.api.filter.TraceThreadField;
+import com.comet.opik.api.sorting.SortingField;
 import com.google.common.collect.ImmutableMap;
 import io.r2dbc.spi.Statement;
 import lombok.NonNull;
@@ -40,6 +41,11 @@ public class FilterQueryBuilder {
     private static final String ANALYTICS_DB_AND_OPERATOR = "AND";
 
     public static final String JSONPATH_ROOT = "$";
+
+    private static final String JSON_EXTRACT_RAW_TEMPLATE = "JSONExtractRaw(%s, '%s')";
+    public static final String OUTPUT_FIELD_PREFIX = "output.";
+    public static final String INPUT_FIELD_PREFIX = "input.";
+    public static final String METADATA_FIELD_PREFIX = "metadata.";
 
     private static final String ID_DB = "id";
     private static final String NAME_DB = "name";
@@ -683,5 +689,67 @@ public class FilterQueryBuilder {
         }
 
         return "%s.%s".formatted(JSONPATH_ROOT, filter.key());
+    }
+
+    /**
+     * Builds field mapping for DatasetItem JSON fields (output, input, metadata).
+     * These fields are stored as JSON strings in ClickHouse, so we need to use JSONExtractRaw
+     * instead of bracket notation. We use literal keys instead of bind parameters
+     * to avoid the dynamic field tuple wrapping.
+     * <p>
+     * This is used for sorting DatasetItem fields.
+     *
+     * @param sortingFields the sorting fields from the request
+     * @return a map from field name to ClickHouse SQL expression
+     */
+    public Map<String, String> buildDatasetItemFieldMapping(@NonNull List<SortingField> sortingFields) {
+        Map<String, String> fieldMapping = new HashMap<>();
+
+        for (SortingField field : sortingFields) {
+            String fieldName = field.field();
+
+            // Check if this is a JSON field (output, input, or metadata)
+            // Use literal keys instead of bind parameters to avoid dynamic field handling
+            if (fieldName.startsWith(OUTPUT_FIELD_PREFIX)) {
+                String key = fieldName.substring(OUTPUT_FIELD_PREFIX.length());
+                fieldMapping.put(fieldName,
+                        JSON_EXTRACT_RAW_TEMPLATE.formatted("output", key));
+            } else if (fieldName.startsWith(INPUT_FIELD_PREFIX)) {
+                String key = fieldName.substring(INPUT_FIELD_PREFIX.length());
+                fieldMapping.put(fieldName,
+                        JSON_EXTRACT_RAW_TEMPLATE.formatted("input", key));
+            } else if (fieldName.startsWith(METADATA_FIELD_PREFIX)) {
+                String key = fieldName.substring(METADATA_FIELD_PREFIX.length());
+                fieldMapping.put(fieldName,
+                        JSON_EXTRACT_RAW_TEMPLATE.formatted("metadata", key));
+            }
+            // For other fields (including feedback_scores, data, etc.), use default dbField()
+        }
+
+        return fieldMapping;
+    }
+
+    /**
+     * Builds a search filter SQL condition for DatasetItem search.
+     * Uses multiSearchAnyCaseInsensitive to search within the data field.
+     *
+     * @param searchText the search text (non-blank)
+     * @return SQL filter condition string
+     */
+    public String buildDatasetItemSearchFilter(@NonNull String searchText) {
+        return "multiSearchAnyCaseInsensitive(toString(data), :searchTerms) > 0";
+    }
+
+    /**
+     * Binds search terms to a statement.
+     * Splits the search text by whitespace and binds as an array.
+     *
+     * @param statement the R2DBC statement
+     * @param searchText the search text to split and bind
+     * @return the statement with bound search terms
+     */
+    public Statement bindSearchTerms(@NonNull Statement statement, @NonNull String searchText) {
+        String[] searchTerms = searchText.split("\\s+");
+        return statement.bind("searchTerms", searchTerms);
     }
 }

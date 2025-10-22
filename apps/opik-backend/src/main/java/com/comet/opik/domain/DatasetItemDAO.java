@@ -5,7 +5,6 @@ import com.comet.opik.api.Column;
 import com.comet.opik.api.DatasetItem;
 import com.comet.opik.api.filter.ExperimentsComparisonFilter;
 import com.comet.opik.api.sorting.SortingFactoryDatasets;
-import com.comet.opik.api.sorting.SortingField;
 import com.comet.opik.domain.filter.FilterQueryBuilder;
 import com.comet.opik.domain.filter.FilterStrategy;
 import com.comet.opik.domain.sorting.SortingQueryBuilder;
@@ -37,9 +36,6 @@ import java.util.UUID;
 import static com.comet.opik.api.DatasetItem.DatasetItemPage;
 import static com.comet.opik.domain.AsyncContextUtils.bindWorkspaceIdToFlux;
 import static com.comet.opik.domain.AsyncContextUtils.bindWorkspaceIdToMono;
-import static com.comet.opik.domain.sorting.SortingQueryBuilder.INPUT_FIELD_PREFIX;
-import static com.comet.opik.domain.sorting.SortingQueryBuilder.METADATA_FIELD_PREFIX;
-import static com.comet.opik.domain.sorting.SortingQueryBuilder.OUTPUT_FIELD_PREFIX;
 import static com.comet.opik.infrastructure.instrumentation.InstrumentAsyncUtils.Segment;
 import static com.comet.opik.infrastructure.instrumentation.InstrumentAsyncUtils.endSegment;
 import static com.comet.opik.infrastructure.instrumentation.InstrumentAsyncUtils.startSegment;
@@ -631,15 +627,15 @@ class DatasetItemDAOImpl implements DatasetItemDAO {
                 di.last_updated_at AS last_updated_at,
                 di.created_by AS created_by,
                 di.last_updated_by AS last_updated_by,
-                any(tfs.duration) AS duration,
-                any(tfs.total_estimated_cost) AS total_estimated_cost,
-                any(tfs.usage) AS usage,
-                any(tfs.feedback_scores) AS feedback_scores,
-                any(tfs.input) AS input,
-                any(tfs.output) AS output,
-                any(tfs.metadata) AS metadata,
-                any(tfs.visibility_mode) AS visibility_mode,
-                any(tfs.comments_array_agg) AS comments,
+                argMax(tfs.duration, ei.created_at) AS duration,
+                argMax(tfs.total_estimated_cost, ei.created_at) AS total_estimated_cost,
+                argMax(tfs.usage, ei.created_at) AS usage,
+                argMax(tfs.feedback_scores, ei.created_at) AS feedback_scores,
+                argMax(tfs.input, ei.created_at) AS input,
+                argMax(tfs.output, ei.created_at) AS output,
+                argMax(tfs.metadata, ei.created_at) AS metadata,
+                argMax(tfs.visibility_mode, ei.created_at) AS visibility_mode,
+                argMax(tfs.comments_array_agg, ei.created_at) AS comments,
                 groupArray(tuple(
                     ei.id,
                     ei.experiment_id,
@@ -989,8 +985,6 @@ class DatasetItemDAOImpl implements DatasetItemDAO {
                     """,
             MAX_DECIMAL_BOUND, MIN_DECIMAL_BOUND);
 
-    private static final String JSON_EXTRACT_RAW_TEMPLATE = "JSONExtractRaw(%s, '%s')";
-
     private final @NonNull TransactionTemplateAsync asyncTemplate;
     private final @NonNull FilterQueryBuilder filterQueryBuilder;
     private final @NonNull OpikConfiguration configuration;
@@ -1214,7 +1208,7 @@ class DatasetItemDAOImpl implements DatasetItemDAO {
         Optional.ofNullable(datasetItemSearchCriteria.search())
                 .filter(s -> !s.isBlank())
                 .ifPresent(searchText -> template.add("search_filter",
-                        "multiSearchAnyCaseInsensitive(toString(data), :searchTerms) > 0"));
+                        filterQueryBuilder.buildDatasetItemSearchFilter(searchText)));
 
         return template;
     }
@@ -1230,10 +1224,7 @@ class DatasetItemDAOImpl implements DatasetItemDAO {
 
         Optional.ofNullable(datasetItemSearchCriteria.search())
                 .filter(s -> !s.isBlank())
-                .ifPresent(searchText -> {
-                    String[] searchTerms = searchText.split("\\s+");
-                    statement.bind("searchTerms", searchTerms);
-                });
+                .ifPresent(searchText -> filterQueryBuilder.bindSearchTerms(statement, searchText));
     }
 
     @Override
@@ -1273,9 +1264,10 @@ class DatasetItemDAOImpl implements DatasetItemDAO {
                     var finalTemplate = selectTemplate;
                     if (datasetItemSearchCriteria.sortingFields() != null) {
                         Optional.ofNullable(sortingQueryBuilder.toOrderBySql(datasetItemSearchCriteria.sortingFields(),
-                                buildFieldMapping(datasetItemSearchCriteria.sortingFields())))
+                                filterQueryBuilder
+                                        .buildDatasetItemFieldMapping(datasetItemSearchCriteria.sortingFields())))
                                 .ifPresent(sortFields -> {
-                                    // feedback_scores is now exposed at outer query level via any(tfs.feedback_scores)
+                                    // feedback_scores is now exposed at outer query level via argMax(tfs.feedback_scores, ei.created_at)
                                     // so we don't need to map it to tfs.feedback_scores anymore
                                     finalTemplate.add("sort_fields", sortFields);
                                 });
@@ -1442,41 +1434,5 @@ class DatasetItemDAOImpl implements DatasetItemDAO {
                     filterQueryBuilder.bind(statement, filtersParam,
                             com.comet.opik.domain.filter.FilterStrategy.DATASET_ITEM);
                 });
-    }
-
-    /**
-     * Builds field mapping for JSON fields (output, input, metadata).
-     * These fields are stored as JSON strings in ClickHouse, so we need to use JSONExtractRaw
-     * instead of bracket notation. We use literal keys instead of bind parameters
-     * to avoid the dynamic field tuple wrapping.
-     *
-     * @param sortingFields the sorting fields from the request
-     * @return a map from field name to ClickHouse SQL expression
-     */
-    private Map<String, String> buildFieldMapping(List<SortingField> sortingFields) {
-        Map<String, String> fieldMapping = new HashMap<>();
-
-        for (SortingField field : sortingFields) {
-            String fieldName = field.field();
-
-            // Check if this is a JSON field (output, input, or metadata)
-            // Use literal keys instead of bind parameters to avoid dynamic field handling
-            if (fieldName.startsWith(OUTPUT_FIELD_PREFIX)) {
-                String key = fieldName.substring(OUTPUT_FIELD_PREFIX.length());
-                fieldMapping.put(fieldName,
-                        JSON_EXTRACT_RAW_TEMPLATE.formatted("output", key));
-            } else if (fieldName.startsWith(INPUT_FIELD_PREFIX)) {
-                String key = fieldName.substring(INPUT_FIELD_PREFIX.length());
-                fieldMapping.put(fieldName,
-                        JSON_EXTRACT_RAW_TEMPLATE.formatted("input", key));
-            } else if (fieldName.startsWith(METADATA_FIELD_PREFIX)) {
-                String key = fieldName.substring(METADATA_FIELD_PREFIX.length());
-                fieldMapping.put(fieldName,
-                        JSON_EXTRACT_RAW_TEMPLATE.formatted("metadata", key));
-            }
-            // For other fields (including feedback_scores, data, etc.), use default dbField()
-        }
-
-        return fieldMapping;
     }
 }

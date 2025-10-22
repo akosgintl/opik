@@ -15,22 +15,6 @@ import java.util.stream.Collectors;
 @Slf4j
 public class SortingQueryBuilder {
     private static final String JSON_EXTRACT_RAW_PREFIX = "JSONExtractRaw(";
-    public static final String OUTPUT_FIELD_PREFIX = "output.";
-    public static final String INPUT_FIELD_PREFIX = "input.";
-    public static final String METADATA_FIELD_PREFIX = "metadata.";
-
-    /**
-     * Checks if a sorting field is a JSON field (output.*, input.*, metadata.*).
-     * JSON fields use JSONExtractRaw with literal keys and should not be treated as dynamic.
-     *
-     * @param field the field name to check
-     * @return true if the field is a JSON field, false otherwise
-     */
-    private boolean isJsonField(String field) {
-        return field.startsWith(OUTPUT_FIELD_PREFIX)
-                || field.startsWith(INPUT_FIELD_PREFIX)
-                || field.startsWith(METADATA_FIELD_PREFIX);
-    }
 
     public String toOrderBySql(@NonNull List<SortingField> sorting) {
         return toOrderBySql(sorting, null);
@@ -64,17 +48,17 @@ public class SortingQueryBuilder {
     }
 
     public boolean hasDynamicKeys(@NonNull List<SortingField> sorting) {
-        // JSON fields (output.*, input.*, metadata.*) are not considered dynamic
-        // because they use JSONExtractRaw with literal keys, not bind parameters
+        // Only fields with bindKeyParam need dynamic binding
+        // Fields without bindKeyParam use literal keys in field mappings (e.g., JSONExtractRaw)
         return sorting.stream()
-                .filter(sortingField -> !isJsonField(sortingField.field()))
-                .anyMatch(SortingField::isDynamic);
+                .filter(SortingField::isDynamic)
+                .anyMatch(field -> field.bindKeyParam() != null);
     }
 
     public Statement bindDynamicKeys(Statement statement, List<SortingField> sorting) {
         sorting.stream()
                 .filter(SortingField::isDynamic)
-                .filter(sortingField -> !isJsonField(sortingField.field()))
+                .filter(sortingField -> sortingField.bindKeyParam() != null)
                 .forEach(sortingField -> {
                     try {
                         statement.bind(sortingField.bindKey(), sortingField.dynamicKey());
