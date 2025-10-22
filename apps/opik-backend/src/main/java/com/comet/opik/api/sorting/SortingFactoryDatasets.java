@@ -1,11 +1,7 @@
 package com.comet.opik.api.sorting;
 
-import com.comet.opik.utils.JsonUtils;
-import jakarta.ws.rs.BadRequestException;
 import org.apache.commons.lang3.StringUtils;
 
-import java.io.UncheckedIOException;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -42,26 +38,11 @@ public class SortingFactoryDatasets extends SortingFactory {
     }
 
     @Override
-    public List<SortingField> newSorting(String queryParam) {
-        List<SortingField> sorting = new ArrayList<>();
-
-        if (StringUtils.isBlank(queryParam)) {
-            return sorting;
-        }
-
-        try {
-            sorting = JsonUtils.readCollectionValue(queryParam, List.class, SortingField.class);
-        } catch (UncheckedIOException exception) {
-            throw new BadRequestException(ERR_INVALID_SORTING_PARAM_TEMPLATE.formatted(queryParam), exception);
-        }
-
+    protected List<SortingField> processFields(List<SortingField> sorting) {
         // Ensure dynamic fields have bindKeyParam set (needed after JSON deserialization)
-        sorting = sorting.stream()
+        return sorting.stream()
                 .map(this::ensureBindKeyParam)
                 .toList();
-
-        // Use parent's validation
-        return super.validateAndReturn(sorting);
     }
 
     private SortingField ensureBindKeyParam(SortingField sortingField) {
