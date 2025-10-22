@@ -37,6 +37,9 @@ import java.util.UUID;
 import static com.comet.opik.api.DatasetItem.DatasetItemPage;
 import static com.comet.opik.domain.AsyncContextUtils.bindWorkspaceIdToFlux;
 import static com.comet.opik.domain.AsyncContextUtils.bindWorkspaceIdToMono;
+import static com.comet.opik.domain.sorting.SortingQueryBuilder.INPUT_FIELD_PREFIX;
+import static com.comet.opik.domain.sorting.SortingQueryBuilder.METADATA_FIELD_PREFIX;
+import static com.comet.opik.domain.sorting.SortingQueryBuilder.OUTPUT_FIELD_PREFIX;
 import static com.comet.opik.infrastructure.instrumentation.InstrumentAsyncUtils.Segment;
 import static com.comet.opik.infrastructure.instrumentation.InstrumentAsyncUtils.endSegment;
 import static com.comet.opik.infrastructure.instrumentation.InstrumentAsyncUtils.startSegment;
@@ -986,9 +989,6 @@ class DatasetItemDAOImpl implements DatasetItemDAO {
                     """,
             MAX_DECIMAL_BOUND, MIN_DECIMAL_BOUND);
 
-    private static final String OUTPUT_FIELD_PREFIX = "output.";
-    private static final String INPUT_FIELD_PREFIX = "input.";
-    private static final String METADATA_FIELD_PREFIX = "metadata.";
     private static final String JSON_EXTRACT_RAW_TEMPLATE = "JSONExtractRaw(%s, '%s')";
 
     private final @NonNull TransactionTemplateAsync asyncTemplate;

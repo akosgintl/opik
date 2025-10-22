@@ -7,6 +7,7 @@ import org.apache.commons.lang3.StringUtils;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 import static com.comet.opik.api.sorting.SortableFields.COMMENTS;
 import static com.comet.opik.api.sorting.SortableFields.CREATED_AT;
@@ -25,6 +26,9 @@ import static com.comet.opik.api.sorting.SortableFields.METADATA_WILDCARD;
 import static com.comet.opik.api.sorting.SortableFields.NAME;
 import static com.comet.opik.api.sorting.SortableFields.OUTPUT_WILDCARD;
 import static com.comet.opik.api.sorting.SortableFields.TAGS;
+import static com.comet.opik.domain.sorting.SortingQueryBuilder.INPUT_FIELD_PREFIX;
+import static com.comet.opik.domain.sorting.SortingQueryBuilder.METADATA_FIELD_PREFIX;
+import static com.comet.opik.domain.sorting.SortingQueryBuilder.OUTPUT_FIELD_PREFIX;
 
 public class SortingFactoryDatasets extends SortingFactory {
 
@@ -65,7 +69,7 @@ public class SortingFactoryDatasets extends SortingFactory {
 
         // JSON fields (output.*, input.*, metadata.*) should NOT be treated as dynamic
         // because they use JSONExtractRaw with literal keys in DatasetItemDAO
-        if (field.startsWith("output.") || field.startsWith("input.") || field.startsWith("metadata.")) {
+        if (field.startsWith(OUTPUT_FIELD_PREFIX) || field.startsWith(INPUT_FIELD_PREFIX) || field.startsWith(METADATA_FIELD_PREFIX)) {
             return sortingField.toBuilder()
                     .bindKeyParam(null)
                     .build();
@@ -78,12 +82,12 @@ public class SortingFactoryDatasets extends SortingFactory {
 
         // If bindKeyParam is already set, return as-is
         String bindKeyParam = sortingField.bindKeyParam();
-        if (bindKeyParam != null && !bindKeyParam.isBlank()) {
+        if (StringUtils.isNotBlank(bindKeyParam)) {
             return sortingField;
         }
 
         // Generate UUID for dynamic field
-        bindKeyParam = java.util.UUID.randomUUID().toString().replace("-", "");
+        bindKeyParam = UUID.randomUUID().toString().replace("-", "");
         return sortingField.toBuilder()
                 .bindKeyParam(bindKeyParam)
                 .build();

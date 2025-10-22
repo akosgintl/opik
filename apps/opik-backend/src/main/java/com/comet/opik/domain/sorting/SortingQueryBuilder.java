@@ -15,9 +15,9 @@ import java.util.stream.Collectors;
 @Slf4j
 public class SortingQueryBuilder {
     private static final String JSON_EXTRACT_RAW_PREFIX = "JSONExtractRaw(";
-    private static final String OUTPUT_FIELD_PREFIX = "output.";
-    private static final String INPUT_FIELD_PREFIX = "input.";
-    private static final String METADATA_FIELD_PREFIX = "metadata.";
+    public static final String OUTPUT_FIELD_PREFIX = "output.";
+    public static final String INPUT_FIELD_PREFIX = "input.";
+    public static final String METADATA_FIELD_PREFIX = "metadata.";
 
     /**
      * Checks if a sorting field is a JSON field (output.*, input.*, metadata.*).
