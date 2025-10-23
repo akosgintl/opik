@@ -42,7 +42,24 @@ public class ExperimentsComparisonFilter extends FilterImpl {
 
         @Override
         public boolean isDynamic(FilterStrategy filterStrategy) {
-            return filterStrategy == FilterStrategy.DATASET_ITEM;
+            String fieldName = queryParamField.toLowerCase();
+
+            // Fields like "output.X", "input.X", "metadata.X" are trace-level fields (EXPERIMENT_ITEM only)
+            boolean isTraceLevelField = fieldName.startsWith("output.")
+                    || fieldName.startsWith("input.")
+                    || fieldName.startsWith("metadata.");
+
+            if (filterStrategy == FilterStrategy.EXPERIMENT_ITEM) {
+                // Only trace-level fields are dynamic for EXPERIMENT_ITEM
+                return isTraceLevelField;
+            }
+
+            if (filterStrategy == FilterStrategy.DATASET_ITEM) {
+                // Only non-trace-level fields are dynamic for DATASET_ITEM (e.g., "data.expected_answer")
+                return !isTraceLevelField;
+            }
+
+            return false;
         }
 
     }
